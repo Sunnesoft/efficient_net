@@ -1,1 +1,4 @@
-# efficient_net
+# EfficientNet
+---
+
+Some variant of realisation of EfficientNet by keras and tensorflow.
