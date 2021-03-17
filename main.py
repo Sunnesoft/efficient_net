@@ -1,10 +1,11 @@
-from abc import ABC
+from abc import ABC, ABCMeta
 import math
 
 import tensorflow as tf
 from tensorflow.keras.layers import Conv2D, BatchNormalization, Activation, \
     DepthwiseConv2D, GlobalAvgPool2D, Multiply, Layer, Reshape, Dropout, Dense
 from tensorflow.keras.models import Model, Sequential
+from tensorflow.python.keras import backend as K
 
 
 class SqueezeExcitation(Layer):
@@ -49,7 +50,8 @@ class MBConv(Layer):
                  expand_ratio,
                  se_ratio,
                  dw_strides,
-                 kernel_size, **kwargs):
+                 kernel_size,
+                 dropout_rate=None, **kwargs):
         super(MBConv, self).__init__(**kwargs)
 
         self.identity_skip = dw_strides == 1
@@ -60,6 +62,7 @@ class MBConv(Layer):
         self.expand_ratio = expand_ratio
         self.expand_filters = int(self.filters * self.expand_ratio)
         self.squeezed_filters = max(1, int(self.filters * self.se_ratio))
+        self.dropout_rate = dropout_rate
 
         self.expand = Conv2D(self.expand_filters, 1,
                              strides=(1, 1),
@@ -86,7 +89,7 @@ class MBConv(Layer):
                            name='%s_conv' % self.name)
         self.bn3 = BatchNormalization(name='%s_bn3' % self.name)
 
-    def call(self, inputs):
+    def call(self, inputs, training=None, mask=None):
         x = self.expand(inputs)
         x = self.bn1(x)
         x = self.swish1(x)
@@ -100,10 +103,26 @@ class MBConv(Layer):
         x = self.conv(x)
         x = self.bn3(x)
 
-        if self.identity_skip:
+        if inputs.shape == x.shape and self.identity_skip:
+            x = self._dropout(x, training)
             x += inputs
 
         return x
+
+    def _dropout(self, inputs, training=None):
+        if training is None:
+            training = K.learning_phase()
+
+        if (not training) or (self.dropout_rate is None):
+            return inputs
+
+        keep_prob = 1.0 - self.dropout_rate
+        batch_size = tf.shape(inputs)[0]
+        random_tensor = keep_prob
+        random_tensor += tf.random.uniform([batch_size, 1, 1, 1], dtype=inputs.dtype)
+        binary_tensor = tf.floor(random_tensor)
+        output = tf.divide(inputs, keep_prob) * binary_tensor
+        return output
 
 
 class EfficientNet(Model, ABC):
@@ -112,7 +131,8 @@ class EfficientNet(Model, ABC):
                  width_coefficient=1.0,
                  depth_coefficient=1.0,
                  se_ratio=0.25,
-                 dropout_rate=0.2, **kwargs):
+                 dropout_rate=0.2,
+                 dropout_batch_rate=0.2, **kwargs):
         super(EfficientNet, self).__init__(**kwargs)
 
         self.width_coefficient = width_coefficient
@@ -132,8 +152,17 @@ class EfficientNet(Model, ABC):
         self.list_num_repeats = [EfficientNet.round_repeats(
             r, self.depth_coefficient) for r in self.list_num_repeats]
 
-        self.mbconv = []
+        self.ll = [
+            Conv2D(self.list_channels[0], 2,
+                   strides=2,
+                   padding='same',
+                   use_bias=False,
+                   name='EffNet_conv1'),
+            BatchNormalization(name='EffNet_bn1'),
+            Activation(tf.nn.swish, name='EffNet_swish1')]
 
+        block_counter = 0
+        num_blocks = sum(self.list_num_repeats)
         for i in range(7):
             ch = self.list_channels[i + 0]
             ch_next = self.list_channels[i + 1]
@@ -141,31 +170,26 @@ class EfficientNet(Model, ABC):
             for j in range(self.list_num_repeats[i]):
                 stride = self.strides[i] if j == 0 else 1
                 chN = ch if j == 0 else ch_next
-                self.mbconv.append(MBConv(
+                drop_rate = dropout_batch_rate * block_counter / num_blocks
+                self.ll.append(MBConv(
                     chN,
                     ch_next,
                     self.expand_rates[i],
                     self.se_ratio,
                     stride,
                     self.kernel_sizes[i],
+                    drop_rate,
                     name='EffNet_MBConv%d_%d_%d' % (self.expand_rates[i], i, j)))
+                block_counter += 1
 
-        self.nn = Sequential([
-            Conv2D(self.list_channels[0], 2,
-                   strides=2,
-                   padding='same',
-                   use_bias=False,
-                   name='EffNet_conv1'),
-            BatchNormalization(name='EffNet_bn1'),
-            Activation(tf.nn.swish, name='EffNet_swish1'),
-            *self.mbconv,
-            Conv2D(self.list_channels[-1], 1, use_bias=False, name='EffNet_conv2'),
-            BatchNormalization(name='EffNet_bn2'),
-            Activation(tf.nn.swish, name='EffNet_swish2'),
-            GlobalAvgPool2D(name='EffNet_gloavg'),
-            Dropout(dropout_rate, name='EffNet_drop'),
-            Dense(num_classes, activation=tf.keras.activations.softmax, name='EffNet_fc')
-        ])
+        self.ll.append(Conv2D(self.list_channels[-1], 1, use_bias=False, name='EffNet_conv2'))
+        self.ll.append(BatchNormalization(name='EffNet_bn2'))
+        self.ll.append(Activation(tf.nn.swish, name='EffNet_swish2'))
+        self.ll.append(GlobalAvgPool2D(name='EffNet_gloavg'))
+        self.ll.append(Dropout(dropout_rate, name='EffNet_drop'))
+        self.ll.append(Dense(num_classes, activation=tf.keras.activations.softmax, name='EffNet_fc'))
+
+        self.nn = Sequential(self.ll)
 
     def call(self, inputs, training=None, mask=None):
         return self.nn(inputs)
@@ -186,6 +210,62 @@ class EfficientNet(Model, ABC):
         return int(math.ceil(multiplier * repeats))
 
 
+class EfficientNetB0(EfficientNet, metaclass=ABCMeta):
+    def __init__(self,
+                 num_classes=100,
+                 se_ratio=0.25, **kwargs):
+        super(EfficientNetB0, self).__init__(num_classes, 1, 1, se_ratio, 0.2, 0.2, **kwargs)
+
+
+class EfficientNetB1(EfficientNet, metaclass=ABCMeta):
+    def __init__(self,
+                 num_classes=100,
+                 se_ratio=0.25, **kwargs):
+        super(EfficientNetB1, self).__init__(num_classes, 1, 1.1, se_ratio, 0.2, 0.2, **kwargs)
+
+
+class EfficientNetB2(EfficientNet, metaclass=ABCMeta):
+    def __init__(self,
+                 num_classes=100,
+                 se_ratio=0.25, **kwargs):
+        super(EfficientNetB2, self).__init__(num_classes, 1.1, 1.2, se_ratio, 0.3, 0.3, **kwargs)
+
+
+class EfficientNetB3(EfficientNet, metaclass=ABCMeta):
+    def __init__(self,
+                 num_classes=100,
+                 se_ratio=0.25, **kwargs):
+        super(EfficientNetB3, self).__init__(num_classes, 1.2, 1.4, se_ratio, 0.3, 0.3, **kwargs)
+
+
+class EfficientNetB4(EfficientNet, metaclass=ABCMeta):
+    def __init__(self,
+                 num_classes=100,
+                 se_ratio=0.25, **kwargs):
+        super(EfficientNetB4, self).__init__(num_classes, 1.4, 1.8, se_ratio, 0.4, 0.4, **kwargs)
+
+
+class EfficientNetB5(EfficientNet, metaclass=ABCMeta):
+    def __init__(self,
+                 num_classes=100,
+                 se_ratio=0.25, **kwargs):
+        super(EfficientNetB5, self).__init__(num_classes, 1.6, 2.2, se_ratio, 0.4, 0.4, **kwargs)
+
+
+class EfficientNetB6(EfficientNet, metaclass=ABCMeta):
+    def __init__(self,
+                 num_classes=100,
+                 se_ratio=0.25, **kwargs):
+        super(EfficientNetB6, self).__init__(num_classes, 1.8, 2.6, se_ratio, 0.5, 0.5, **kwargs)
+
+
+class EfficientNetB7(EfficientNet, metaclass=ABCMeta):
+    def __init__(self,
+                 num_classes=100,
+                 se_ratio=0.25, **kwargs):
+        super(EfficientNetB7, self).__init__(num_classes, 2.0, 3.1, se_ratio, 0.5, 0.5, **kwargs)
+
+
 if __name__ == '__main__':
     print(tf.__version__)
     print("Num GPUs Available: ", tf.config.list_physical_devices('GPU'))
@@ -194,7 +274,7 @@ if __name__ == '__main__':
     gpus = tf.config.experimental.list_physical_devices('GPU')
     tf.config.experimental.set_memory_growth(gpus[0], True)
 
-    en = EfficientNet()
+    en = EfficientNetB7()
     en.compile(optimizer="adam", loss="mse")
     en.build((1024, 256, 256, 3))
     print(en.summary())
