@@ -299,7 +299,7 @@ class EfficientNetB7(EfficientNet, metaclass=ABCMeta):
 
 
 class DatasetPreprocessor:
-    def __init__(self, classes_number, target_width, target_height, resize_method='bicubic'):
+    def __init__(self, classes_number, target_width, target_height, resize_method='bilinear'):
         self.classes_number = classes_number
         self.target_width = target_width
         self.target_height = target_height
@@ -318,6 +318,7 @@ class DatasetPreprocessor:
         :param ds: dataset, which must loaded with keys as_supervised=True and batch_size=-1
         :return: list of objects
         """
+
         def run(x, y):
             with tf.device('/device:CPU:0'):
                 x_new = tf.image.resize(x, [self.target_height, self.target_width], method=self.resize_method)
@@ -330,7 +331,7 @@ class DatasetPreprocessor:
     def process_as_dataset(self, ds):
         return ds.map(
             lambda x, y: (tf.image.resize(
-                x, [self.target_height, self.target_width], method=self.resize_method)/255.,
+                x, [self.target_height, self.target_width], method=self.resize_method) / 255.,
                           tf.one_hot(y, self.classes_number, dtype=tf.uint32)))
 
 
@@ -347,22 +348,26 @@ if __name__ == '__main__':
     CHANNEL_COUNT = 3
     CLASSES_NUMBER = 100
 
-    en = EfficientNetB0(CLASSES_NUMBER)
-    en.compile(optimizer="adam", loss="mse")
-    en.build((BATCH_SIZE, en.image_resolution, en.image_resolution, CHANNEL_COUNT))
-    print(en.summary())
+    with tf.device('/device:GPU:0'):
+        en = EfficientNetB0(CLASSES_NUMBER)
+        en.compile(optimizer=tf.keras.optimizers.SGD(learning_rate=0.005, momentum=0.9),
+                   loss=tf.keras.losses.CategoricalCrossentropy(),
+                   metrics=['accuracy'])
+        en.build((BATCH_SIZE, en.image_resolution, en.image_resolution, CHANNEL_COUNT))
+        print(en.summary())
 
-    [ds_train, ds_test], ds_info = tfds.load('cifar100', split=['train', 'test'],
-                                             shuffle_files=True, with_info=True,
-                                             as_supervised=True)
+        [ds_train, ds_test], ds_info = tfds.load('cifar100', split=['train', 'test'],
+                                                 shuffle_files=True, with_info=True,
+                                                 as_supervised=True)
 
-    dspr = DatasetPreprocessor(CLASSES_NUMBER, en.image_resolution, en.image_resolution)
-    ds_train_gpu = dspr.process_as_dataset(ds_train)
-    print(ds_train_gpu)
-    # ds_train_cpu = dspr.process_as_numpy(tfds.as_numpy(ds_train))
+        dspr = DatasetPreprocessor(CLASSES_NUMBER, en.image_resolution, en.image_resolution)
+        ds_train_gpu = dspr.process_as_dataset(ds_test)
+        print(ds_train_gpu)
+        # ds_train_cpu = dspr.process_as_numpy(tfds.as_numpy(ds_train))
 
-    ds_train_gpu = ds_train_gpu.batch(BATCH_SIZE).prefetch(1)
-    print(ds_train_gpu)
-    en.fit(ds_train_gpu)
+        ds_train_gpu = ds_train_gpu.batch(BATCH_SIZE).prefetch(1)
+        print(ds_train_gpu)
+
+        en.fit(ds_train_gpu, epochs=5)
 
     exit(0)
