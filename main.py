@@ -2,6 +2,8 @@ from abc import ABC, ABCMeta
 import math
 
 import tensorflow as tf
+import tensorflow_datasets as tfds
+
 from tensorflow.keras.layers import Conv2D, BatchNormalization, Activation, \
     DepthwiseConv2D, GlobalAvgPool2D, Multiply, Layer, Reshape, Dropout, Dense
 from tensorflow.keras.models import Model, Sequential
@@ -132,13 +134,18 @@ class EfficientNet(Model, ABC):
                  depth_coefficient=1.0,
                  se_ratio=0.25,
                  dropout_rate=0.2,
-                 dropout_batch_rate=0.2, **kwargs):
+                 dropout_batch_rate=0.2,
+                 image_resolution=224, **kwargs):
         super(EfficientNet, self).__init__(**kwargs)
 
-        self.width_coefficient = width_coefficient
-        self.depth_coefficient = depth_coefficient
-        self.divisor = 8
-        self.se_ratio = se_ratio
+        self._divisor = 8
+
+        self._width_coefficient = width_coefficient
+        self._depth_coefficient = depth_coefficient
+        self._se_ratio = se_ratio
+        self._dropout_rate = dropout_rate
+        self._dropout_batch_rate = dropout_batch_rate
+        self._image_resolution = image_resolution
 
         self.list_channels = [32, 16, 24, 40, 80, 112, 192, 320, 1280]
         self.list_num_repeats = [1, 2, 2, 3, 3, 4, 1]
@@ -147,7 +154,7 @@ class EfficientNet(Model, ABC):
         self.kernel_sizes = [3, 3, 5, 3, 5, 5, 3]
 
         self.list_channels = [EfficientNet.round_filters(
-            c, self.width_coefficient, self.divisor) for c in self.list_channels]
+            c, self.width_coefficient, self._divisor) for c in self.list_channels]
 
         self.list_num_repeats = [EfficientNet.round_repeats(
             r, self.depth_coefficient) for r in self.list_num_repeats]
@@ -170,7 +177,7 @@ class EfficientNet(Model, ABC):
             for j in range(self.list_num_repeats[i]):
                 stride = self.strides[i] if j == 0 else 1
                 chN = ch if j == 0 else ch_next
-                drop_rate = dropout_batch_rate * block_counter / num_blocks
+                drop_rate = self.dropout_batch_rate * block_counter / num_blocks
                 self.ll.append(MBConv(
                     chN,
                     ch_next,
@@ -186,13 +193,37 @@ class EfficientNet(Model, ABC):
         self.ll.append(BatchNormalization(name='EffNet_bn2'))
         self.ll.append(Activation(tf.nn.swish, name='EffNet_swish2'))
         self.ll.append(GlobalAvgPool2D(name='EffNet_gloavg'))
-        self.ll.append(Dropout(dropout_rate, name='EffNet_drop'))
+        self.ll.append(Dropout(self.dropout_rate, name='EffNet_drop'))
         self.ll.append(Dense(num_classes, activation=tf.keras.activations.softmax, name='EffNet_fc'))
 
         self.nn = Sequential(self.ll)
 
     def call(self, inputs, training=None, mask=None):
         return self.nn(inputs)
+
+    @property
+    def width_coefficient(self):
+        return self._width_coefficient
+
+    @property
+    def depth_coefficient(self):
+        return self._depth_coefficient
+
+    @property
+    def se_ratio(self):
+        return self._se_ratio
+
+    @property
+    def dropout_rate(self):
+        return self._dropout_rate
+
+    @property
+    def dropout_batch_rate(self):
+        return self._dropout_batch_rate
+
+    @property
+    def image_resolution(self):
+        return self._image_resolution
 
     def round_filters(filters, multiplier, divisor):
         if not multiplier:
@@ -214,56 +245,93 @@ class EfficientNetB0(EfficientNet, metaclass=ABCMeta):
     def __init__(self,
                  num_classes=100,
                  se_ratio=0.25, **kwargs):
-        super(EfficientNetB0, self).__init__(num_classes, 1, 1, se_ratio, 0.2, 0.2, **kwargs)
+        super(EfficientNetB0, self).__init__(num_classes, 1, 1, se_ratio, 0.2, 0.2, 224, **kwargs)
 
 
 class EfficientNetB1(EfficientNet, metaclass=ABCMeta):
     def __init__(self,
                  num_classes=100,
                  se_ratio=0.25, **kwargs):
-        super(EfficientNetB1, self).__init__(num_classes, 1, 1.1, se_ratio, 0.2, 0.2, **kwargs)
+        super(EfficientNetB1, self).__init__(num_classes, 1, 1.1, se_ratio, 0.2, 0.2, 240, **kwargs)
+        self.resolution = 224
 
 
 class EfficientNetB2(EfficientNet, metaclass=ABCMeta):
     def __init__(self,
                  num_classes=100,
                  se_ratio=0.25, **kwargs):
-        super(EfficientNetB2, self).__init__(num_classes, 1.1, 1.2, se_ratio, 0.3, 0.3, **kwargs)
+        super(EfficientNetB2, self).__init__(num_classes, 1.1, 1.2, se_ratio, 0.3, 0.3, 260, **kwargs)
 
 
 class EfficientNetB3(EfficientNet, metaclass=ABCMeta):
     def __init__(self,
                  num_classes=100,
                  se_ratio=0.25, **kwargs):
-        super(EfficientNetB3, self).__init__(num_classes, 1.2, 1.4, se_ratio, 0.3, 0.3, **kwargs)
+        super(EfficientNetB3, self).__init__(num_classes, 1.2, 1.4, se_ratio, 0.3, 0.3, 300, **kwargs)
 
 
 class EfficientNetB4(EfficientNet, metaclass=ABCMeta):
     def __init__(self,
                  num_classes=100,
                  se_ratio=0.25, **kwargs):
-        super(EfficientNetB4, self).__init__(num_classes, 1.4, 1.8, se_ratio, 0.4, 0.4, **kwargs)
+        super(EfficientNetB4, self).__init__(num_classes, 1.4, 1.8, se_ratio, 0.4, 0.4, 380, **kwargs)
 
 
 class EfficientNetB5(EfficientNet, metaclass=ABCMeta):
     def __init__(self,
                  num_classes=100,
                  se_ratio=0.25, **kwargs):
-        super(EfficientNetB5, self).__init__(num_classes, 1.6, 2.2, se_ratio, 0.4, 0.4, **kwargs)
+        super(EfficientNetB5, self).__init__(num_classes, 1.6, 2.2, se_ratio, 0.4, 0.4, 456, **kwargs)
 
 
 class EfficientNetB6(EfficientNet, metaclass=ABCMeta):
     def __init__(self,
                  num_classes=100,
                  se_ratio=0.25, **kwargs):
-        super(EfficientNetB6, self).__init__(num_classes, 1.8, 2.6, se_ratio, 0.5, 0.5, **kwargs)
+        super(EfficientNetB6, self).__init__(num_classes, 1.8, 2.6, se_ratio, 0.5, 0.5, 528, **kwargs)
 
 
 class EfficientNetB7(EfficientNet, metaclass=ABCMeta):
     def __init__(self,
                  num_classes=100,
                  se_ratio=0.25, **kwargs):
-        super(EfficientNetB7, self).__init__(num_classes, 2.0, 3.1, se_ratio, 0.5, 0.5, **kwargs)
+        super(EfficientNetB7, self).__init__(num_classes, 2.0, 3.1, se_ratio, 0.5, 0.5, 600, **kwargs)
+
+
+class DatasetPreprocessor:
+    def __init__(self, classes_number, target_width, target_height, resize_method='bicubic'):
+        self.classes_number = classes_number
+        self.target_width = target_width
+        self.target_height = target_height
+        self.resize_method = resize_method
+
+    def process_as_numpy(self, ds):
+        """
+        Ex.:
+                [ds_train, ds_test], ds_info = tfds.load('cifar100', split=['train', 'test'],
+                                             shuffle_files=True, with_info=True,
+                                             as_supervised=True, batch_size=-1)
+
+                dspr = DatasetPreprocessor(CLASSES_NUMBER, en.image_resolution, en.image_resolution)
+                ds_train_cpu = dspr.process_as_numpy(tfds.as_numpy(ds_train))
+
+        :param ds: dataset, which must loaded with keys as_supervised=True and batch_size=-1
+        :return: list of objects
+        """
+        def run(x, y):
+            with tf.device('/device:CPU:0'):
+                x_new = tf.image.resize(x, [self.target_height, self.target_width], method=self.resize_method)
+                y_new = [0] * self.classes_number
+                y_new[y] = 1
+                return x_new, y_new
+
+        return list(map(run, ds[0], ds[1]))
+
+    def process_as_dataset(self, ds):
+        return ds.map(
+            lambda x, y: (tf.image.resize(
+                x, [self.target_height, self.target_width], method=self.resize_method)/255.,
+                          tf.one_hot(y, self.classes_number, dtype=tf.uint32)))
 
 
 if __name__ == '__main__':
@@ -273,10 +341,28 @@ if __name__ == '__main__':
 
     gpus = tf.config.experimental.list_physical_devices('GPU')
     tf.config.experimental.set_memory_growth(gpus[0], True)
+    # tf.config.run_functions_eagerly(True)
 
-    en = EfficientNetB7()
+    BATCH_SIZE = 8
+    CHANNEL_COUNT = 3
+    CLASSES_NUMBER = 100
+
+    en = EfficientNetB0(CLASSES_NUMBER)
     en.compile(optimizer="adam", loss="mse")
-    en.build((1024, 256, 256, 3))
+    en.build((BATCH_SIZE, en.image_resolution, en.image_resolution, CHANNEL_COUNT))
     print(en.summary())
+
+    [ds_train, ds_test], ds_info = tfds.load('cifar100', split=['train', 'test'],
+                                             shuffle_files=True, with_info=True,
+                                             as_supervised=True)
+
+    dspr = DatasetPreprocessor(CLASSES_NUMBER, en.image_resolution, en.image_resolution)
+    ds_train_gpu = dspr.process_as_dataset(ds_train)
+    print(ds_train_gpu)
+    # ds_train_cpu = dspr.process_as_numpy(tfds.as_numpy(ds_train))
+
+    ds_train_gpu = ds_train_gpu.batch(BATCH_SIZE).prefetch(1)
+    print(ds_train_gpu)
+    en.fit(ds_train_gpu)
 
     exit(0)
