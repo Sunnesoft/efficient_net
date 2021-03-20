@@ -24,12 +24,14 @@ class SqueezeExcitation(Layer):
                           strides=(1, 1),
                           padding='same',
                           activation='swish',
+                          use_bias=True,
                           name='%s_fc1' % self.name)
 
         self.fc2 = Conv2D(filters, 1,
                           strides=(1, 1),
                           padding='same',
                           activation='sigmoid',
+                          use_bias=True,
                           name='%s_fc2' % self.name)
         self.mult = Multiply(name='%s_mult' % self.name)
 
@@ -53,7 +55,9 @@ class MBConv(Layer):
                  se_ratio,
                  dw_strides,
                  kernel_size,
-                 dropout_rate=None, **kwargs):
+                 dropout_rate=None,
+                 batch_norm_momentum=0.99,
+                 batch_norm_epsilon=1e-3, **kwargs):
         super(MBConv, self).__init__(**kwargs)
 
         self.identity_skip = dw_strides == 1
@@ -71,13 +75,17 @@ class MBConv(Layer):
                              padding='same',
                              use_bias=False,
                              name='%s_expand' % self.name)
-        self.bn1 = BatchNormalization(name='%s_bn1' % self.name)
+        self.bn1 = BatchNormalization(momentum=batch_norm_momentum,
+                                      epsilon=batch_norm_epsilon,
+                                      name='%s_bn1' % self.name)
         self.swish1 = Activation(tf.nn.swish, name='%s_swish1' % self.name)
 
         self.dwconv = DepthwiseConv2D(self.kernel_size, padding='same',
                                       strides=dw_strides,
                                       use_bias=False, name='%s_dwconv' % self.name)
-        self.bn2 = BatchNormalization(name='%s_bn2' % self.name)
+        self.bn2 = BatchNormalization(momentum=batch_norm_momentum,
+                                      epsilon=batch_norm_epsilon,
+                                      name='%s_bn2' % self.name)
         self.swish2 = Activation(tf.nn.swish, name='%s_swish2' % self.name)
 
         self.se = SqueezeExcitation(self.expand_filters,
@@ -89,7 +97,9 @@ class MBConv(Layer):
                            padding='same',
                            use_bias=False,
                            name='%s_conv' % self.name)
-        self.bn3 = BatchNormalization(name='%s_bn3' % self.name)
+        self.bn3 = BatchNormalization(momentum=batch_norm_momentum,
+                                      epsilon=batch_norm_epsilon,
+                                      name='%s_bn3' % self.name)
 
     def call(self, inputs, training=None, mask=None):
         x = self.expand(inputs)
@@ -135,7 +145,9 @@ class EfficientNet(Model, ABC):
                  se_ratio=0.25,
                  dropout_rate=0.2,
                  dropout_batch_rate=0.2,
-                 image_resolution=224, **kwargs):
+                 image_resolution=224,
+                 batch_norm_momentum=0.99,
+                 batch_norm_epsilon=1e-3, **kwargs):
         super(EfficientNet, self).__init__(**kwargs)
 
         self._divisor = 8
@@ -165,7 +177,7 @@ class EfficientNet(Model, ABC):
                    padding='same',
                    use_bias=False,
                    name='EffNet_conv1'),
-            BatchNormalization(name='EffNet_bn1'),
+            BatchNormalization(momentum=batch_norm_momentum, epsilon=batch_norm_epsilon, name='EffNet_bn1'),
             Activation(tf.nn.swish, name='EffNet_swish1')]
 
         block_counter = 0
@@ -186,11 +198,13 @@ class EfficientNet(Model, ABC):
                     stride,
                     self.kernel_sizes[i],
                     drop_rate,
+                    batch_norm_momentum,
+                    batch_norm_epsilon,
                     name='EffNet_MBConv%d_%d_%d' % (self.expand_rates[i], i, j)))
                 block_counter += 1
 
         self.ll.append(Conv2D(self.list_channels[-1], 1, use_bias=False, name='EffNet_conv2'))
-        self.ll.append(BatchNormalization(name='EffNet_bn2'))
+        self.ll.append(BatchNormalization(momentum=batch_norm_momentum, epsilon=batch_norm_epsilon, name='EffNet_bn2'))
         self.ll.append(Activation(tf.nn.swish, name='EffNet_swish2'))
         self.ll.append(GlobalAvgPool2D(name='EffNet_gloavg'))
         self.ll.append(Dropout(self.dropout_rate, name='EffNet_drop'))
@@ -244,58 +258,81 @@ class EfficientNet(Model, ABC):
 class EfficientNetB0(EfficientNet, metaclass=ABCMeta):
     def __init__(self,
                  num_classes=100,
-                 se_ratio=0.25, **kwargs):
-        super(EfficientNetB0, self).__init__(num_classes, 1, 1, se_ratio, 0.2, 0.2, 224, **kwargs)
+                 se_ratio=0.25,
+                 batch_norm_momentum=0.99,
+                 batch_norm_epsilon=1e-3, **kwargs):
+        super(EfficientNetB0, self).__init__(
+            num_classes, 1, 1, se_ratio, 0.2, 0.2, 224, batch_norm_momentum, batch_norm_epsilon, **kwargs)
 
 
 class EfficientNetB1(EfficientNet, metaclass=ABCMeta):
     def __init__(self,
                  num_classes=100,
-                 se_ratio=0.25, **kwargs):
-        super(EfficientNetB1, self).__init__(num_classes, 1, 1.1, se_ratio, 0.2, 0.2, 240, **kwargs)
-        self.resolution = 224
+                 se_ratio=0.25,
+                 batch_norm_momentum=0.99,
+                 batch_norm_epsilon=1e-3, **kwargs):
+        super(EfficientNetB1, self).__init__(
+            num_classes, 1, 1.1, se_ratio, 0.2, 0.2, 240, batch_norm_momentum, batch_norm_epsilon, **kwargs)
 
 
 class EfficientNetB2(EfficientNet, metaclass=ABCMeta):
     def __init__(self,
                  num_classes=100,
-                 se_ratio=0.25, **kwargs):
-        super(EfficientNetB2, self).__init__(num_classes, 1.1, 1.2, se_ratio, 0.3, 0.3, 260, **kwargs)
+                 se_ratio=0.25,
+                 batch_norm_momentum=0.99,
+                 batch_norm_epsilon=1e-3, **kwargs):
+        super(EfficientNetB2, self).__init__(
+            num_classes, 1.1, 1.2, se_ratio, 0.3, 0.3, 260, batch_norm_momentum, batch_norm_epsilon, **kwargs)
 
 
 class EfficientNetB3(EfficientNet, metaclass=ABCMeta):
     def __init__(self,
                  num_classes=100,
-                 se_ratio=0.25, **kwargs):
-        super(EfficientNetB3, self).__init__(num_classes, 1.2, 1.4, se_ratio, 0.3, 0.3, 300, **kwargs)
+                 se_ratio=0.25,
+                 batch_norm_momentum=0.99,
+                 batch_norm_epsilon=1e-3, **kwargs):
+        super(EfficientNetB3, self).__init__(
+            num_classes, 1.2, 1.4, se_ratio, 0.3, 0.3, 300, batch_norm_momentum, batch_norm_epsilon, **kwargs)
 
 
 class EfficientNetB4(EfficientNet, metaclass=ABCMeta):
     def __init__(self,
                  num_classes=100,
-                 se_ratio=0.25, **kwargs):
-        super(EfficientNetB4, self).__init__(num_classes, 1.4, 1.8, se_ratio, 0.4, 0.4, 380, **kwargs)
+                 se_ratio=0.25,
+                 batch_norm_momentum=0.99,
+                 batch_norm_epsilon=1e-3, **kwargs):
+        super(EfficientNetB4, self).__init__(
+            num_classes, 1.4, 1.8, se_ratio, 0.4, 0.4, 380, batch_norm_momentum, batch_norm_epsilon, **kwargs)
 
 
 class EfficientNetB5(EfficientNet, metaclass=ABCMeta):
     def __init__(self,
                  num_classes=100,
-                 se_ratio=0.25, **kwargs):
-        super(EfficientNetB5, self).__init__(num_classes, 1.6, 2.2, se_ratio, 0.4, 0.4, 456, **kwargs)
+                 se_ratio=0.25,
+                 batch_norm_momentum=0.99,
+                 batch_norm_epsilon=1e-3, **kwargs):
+        super(EfficientNetB5, self).__init__(
+            num_classes, 1.6, 2.2, se_ratio, 0.4, 0.4, 456, batch_norm_momentum, batch_norm_epsilon, **kwargs)
 
 
 class EfficientNetB6(EfficientNet, metaclass=ABCMeta):
     def __init__(self,
                  num_classes=100,
-                 se_ratio=0.25, **kwargs):
-        super(EfficientNetB6, self).__init__(num_classes, 1.8, 2.6, se_ratio, 0.5, 0.5, 528, **kwargs)
+                 se_ratio=0.25,
+                 batch_norm_momentum=0.99,
+                 batch_norm_epsilon=1e-3, **kwargs):
+        super(EfficientNetB6, self).__init__(
+            num_classes, 1.8, 2.6, se_ratio, 0.5, 0.5, 528, batch_norm_momentum, batch_norm_epsilon, **kwargs)
 
 
 class EfficientNetB7(EfficientNet, metaclass=ABCMeta):
     def __init__(self,
                  num_classes=100,
-                 se_ratio=0.25, **kwargs):
-        super(EfficientNetB7, self).__init__(num_classes, 2.0, 3.1, se_ratio, 0.5, 0.5, 600, **kwargs)
+                 se_ratio=0.25,
+                 batch_norm_momentum=0.99,
+                 batch_norm_epsilon=1e-3, **kwargs):
+        super(EfficientNetB7, self).__init__(
+            num_classes, 2.0, 3.1, se_ratio, 0.5, 0.5, 600, batch_norm_momentum, batch_norm_epsilon, **kwargs)
 
 
 class DatasetPreprocessor:
@@ -330,9 +367,16 @@ class DatasetPreprocessor:
 
     def process_as_dataset(self, ds):
         return ds.map(
-            lambda x, y: (tf.image.resize(
-                x, [self.target_height, self.target_width], method=self.resize_method) / 255.,
-                          tf.one_hot(y, self.classes_number, dtype=tf.uint32)))
+            lambda x, y: (DatasetPreprocessor.normalize_features(
+                tf.image.resize(x, [self.target_height, self.target_width], method=self.resize_method)),
+                tf.one_hot(y, self.classes_number, dtype=tf.uint32)))
+
+    def normalize_features(features,
+                           mean_rgb=[0.485 * 255, 0.456 * 255, 0.406 * 255],
+                           stddev_rgb=[0.229 * 255, 0.224 * 255, 0.225 * 255]):
+        features -= tf.constant(mean_rgb, shape=[1, 1, 3], dtype=tf.float32)
+        features /= tf.constant(stddev_rgb, shape=[1, 1, 3], dtype=tf.float32)
+        return features
 
 
 if __name__ == '__main__':
@@ -346,28 +390,52 @@ if __name__ == '__main__':
 
     BATCH_SIZE = 8
     CHANNEL_COUNT = 3
-    CLASSES_NUMBER = 100
+    CLASSES_NUMBER = 10
+
+    decay = 0.9
+    epsilon = 0.001
+    momentum = 0.9
+    initial_learning_rate = 0.016
+    steps_per_epoch = 50000 / BATCH_SIZE
+    decay_factor = 0.97
+    decay_epochs = 2.4
+    batch_norm_momentum = 0.99
+    batch_norm_epsilon = 1e-3
+    se_ratio = 0.25
+
+    scaled_lr = initial_learning_rate * (BATCH_SIZE / 256.0)
+
+    decay_steps = steps_per_epoch * decay_epochs
+
+    lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
+        scaled_lr,
+        decay_steps=decay_steps,
+        decay_rate=decay_factor,
+        staircase=True)
 
     with tf.device('/device:GPU:0'):
-        en = EfficientNetB0(CLASSES_NUMBER)
-        en.compile(optimizer=tf.keras.optimizers.SGD(learning_rate=0.005, momentum=0.9),
+        en = EfficientNetB0(CLASSES_NUMBER, se_ratio, batch_norm_momentum, batch_norm_epsilon)
+        en.compile(optimizer=tf.keras.optimizers.RMSprop(lr_schedule, decay, momentum, epsilon),
                    loss=tf.keras.losses.CategoricalCrossentropy(),
                    metrics=['accuracy'])
         en.build((BATCH_SIZE, en.image_resolution, en.image_resolution, CHANNEL_COUNT))
         print(en.summary())
 
-        [ds_train, ds_test], ds_info = tfds.load('cifar100', split=['train', 'test'],
+        [ds_train, ds_test], ds_info = tfds.load('cifar10', split=['train', 'test'],
                                                  shuffle_files=True, with_info=True,
                                                  as_supervised=True)
 
         dspr = DatasetPreprocessor(CLASSES_NUMBER, en.image_resolution, en.image_resolution)
-        ds_train_gpu = dspr.process_as_dataset(ds_test)
-        print(ds_train_gpu)
-        # ds_train_cpu = dspr.process_as_numpy(tfds.as_numpy(ds_train))
-
-        ds_train_gpu = ds_train_gpu.batch(BATCH_SIZE).prefetch(1)
+        ds_train_gpu = dspr.process_as_dataset(ds_train)
+        ds_train_gpu = ds_train_gpu.cache().batch(BATCH_SIZE).prefetch(1)
         print(ds_train_gpu)
 
-        en.fit(ds_train_gpu, epochs=5)
+        ds_test_gpu = dspr.process_as_dataset(ds_test)
+        ds_test_gpu = ds_test_gpu.cache().batch(BATCH_SIZE).prefetch(1)
+        print(ds_test_gpu)
+
+        history = en.fit(ds_train_gpu, epochs=5)
+        results = en.evaluate(ds_test_gpu)
+        print(results)
 
     exit(0)
