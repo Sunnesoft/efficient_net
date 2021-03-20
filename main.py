@@ -9,6 +9,8 @@ from tensorflow.keras.layers import Conv2D, BatchNormalization, Activation, \
 from tensorflow.keras.models import Model, Sequential
 from tensorflow.python.keras import backend as K
 
+import matplotlib.pyplot as plt
+
 
 class SqueezeExcitation(Layer):
     def __init__(self, filters, se_filters, **kwargs):
@@ -391,6 +393,7 @@ if __name__ == '__main__':
     BATCH_SIZE = 8
     CHANNEL_COUNT = 3
     CLASSES_NUMBER = 10
+    AUTOTUNE = tf.data.AUTOTUNE
 
     decay = 0.9
     epsilon = 0.001
@@ -402,6 +405,7 @@ if __name__ == '__main__':
     batch_norm_momentum = 0.99
     batch_norm_epsilon = 1e-3
     se_ratio = 0.25
+    epochs = 10
 
     scaled_lr = initial_learning_rate * (BATCH_SIZE / 256.0)
 
@@ -417,7 +421,7 @@ if __name__ == '__main__':
         en = EfficientNetB0(CLASSES_NUMBER, se_ratio, batch_norm_momentum, batch_norm_epsilon)
         en.compile(optimizer=tf.keras.optimizers.RMSprop(lr_schedule, decay, momentum, epsilon),
                    loss=tf.keras.losses.CategoricalCrossentropy(),
-                   metrics=['accuracy'])
+                   metrics=[tf.keras.metrics.Accuracy(), tf.keras.metrics.TopKCategoricalAccuracy()])
         en.build((BATCH_SIZE, en.image_resolution, en.image_resolution, CHANNEL_COUNT))
         print(en.summary())
 
@@ -427,15 +431,37 @@ if __name__ == '__main__':
 
         dspr = DatasetPreprocessor(CLASSES_NUMBER, en.image_resolution, en.image_resolution)
         ds_train_gpu = dspr.process_as_dataset(ds_train)
-        ds_train_gpu = ds_train_gpu.cache().batch(BATCH_SIZE).prefetch(1)
+        ds_train_gpu = ds_train_gpu.cache().shuffle(1000).batch(BATCH_SIZE).prefetch(buffer_size=AUTOTUNE)
         print(ds_train_gpu)
 
         ds_test_gpu = dspr.process_as_dataset(ds_test)
-        ds_test_gpu = ds_test_gpu.cache().batch(BATCH_SIZE).prefetch(1)
+        ds_test_gpu = ds_test_gpu.cache().shuffle(1000).batch(BATCH_SIZE).prefetch(buffer_size=AUTOTUNE)
         print(ds_test_gpu)
 
-        history = en.fit(ds_train_gpu, epochs=5)
+        history = en.fit(ds_train_gpu, epochs=epochs)
         results = en.evaluate(ds_test_gpu)
         print(results)
+
+        en.save('EfficientNetB0.h5')
+
+        acc = history.history['accuracy']
+        top5_acc = history.history['top_k_categorical_accuracy']
+
+        loss = history.history['loss']
+
+        epochs_range = range(epochs)
+
+        plt.figure(figsize=(8, 8))
+        plt.subplot(1, 2, 1)
+        plt.plot(epochs_range, acc, label='Training Accuracy')
+        plt.plot(epochs_range, top5_acc, label='Top5 Training Accuracy')
+        plt.legend(loc='lower right')
+        plt.title('Training Accuracy')
+
+        plt.subplot(1, 2, 2)
+        plt.plot(epochs_range, loss, label='Training Loss')
+        plt.legend(loc='upper right')
+        plt.title('Training Loss')
+        plt.show()
 
     exit(0)
