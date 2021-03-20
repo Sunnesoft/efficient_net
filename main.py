@@ -446,7 +446,6 @@ if __name__ == '__main__':
 
         acc = history.history['accuracy']
         top5_acc = history.history['top_k_categorical_accuracy']
-
         loss = history.history['loss']
 
         epochs_range = range(epochs)
