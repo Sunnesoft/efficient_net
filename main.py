@@ -11,6 +11,24 @@ from tensorflow.python.keras import backend as K
 
 import matplotlib.pyplot as plt
 
+CONV_KERNEL_INITIALIZER = {
+    'class_name': 'VarianceScaling',
+    'config': {
+        'scale': 2.0,
+        'mode': 'fan_out',
+        'distribution': 'truncated_normal'
+    }
+}
+
+DENSE_KERNEL_INITIALIZER = {
+    'class_name': 'VarianceScaling',
+    'config': {
+        'scale': 1. / 3.,
+        'mode': 'fan_out',
+        'distribution': 'uniform'
+    }
+}
+
 
 class SqueezeExcitation(Layer):
     def __init__(self, filters, se_filters, **kwargs):
@@ -27,6 +45,7 @@ class SqueezeExcitation(Layer):
                           padding='same',
                           activation='swish',
                           use_bias=True,
+                          kernel_initializer=CONV_KERNEL_INITIALIZER,
                           name='%s_fc1' % self.name)
 
         self.fc2 = Conv2D(filters, 1,
@@ -34,6 +53,7 @@ class SqueezeExcitation(Layer):
                           padding='same',
                           activation='sigmoid',
                           use_bias=True,
+                          kernel_initializer=CONV_KERNEL_INITIALIZER,
                           name='%s_fc2' % self.name)
         self.mult = Multiply(name='%s_mult' % self.name)
 
@@ -43,6 +63,14 @@ class SqueezeExcitation(Layer):
         x = self.fc1(x)
         x = self.fc2(x)
         return self.mult([inputs, x])
+
+    def get_config(self):
+        config = super(SqueezeExcitation, self).get_config()
+        config.update({
+            "filters": self.filters,
+            "squeezed_filters": self.squeezed_filters
+        })
+        return config
 
 
 class MBConv(Layer):
@@ -62,8 +90,10 @@ class MBConv(Layer):
                  batch_norm_epsilon=1e-3, **kwargs):
         super(MBConv, self).__init__(**kwargs)
 
-        self.identity_skip = dw_strides == 1
-
+        self.dw_strides = dw_strides
+        self.identity_skip = self.dw_strides == 1
+        self.batch_norm_momentum = batch_norm_momentum
+        self.batch_norm_epsilon = batch_norm_epsilon
         self.kernel_size = kernel_size
         self.filters = filters
         self.se_ratio = se_ratio
@@ -76,17 +106,20 @@ class MBConv(Layer):
                              strides=(1, 1),
                              padding='same',
                              use_bias=False,
+                             kernel_initializer=CONV_KERNEL_INITIALIZER,
                              name='%s_expand' % self.name)
-        self.bn1 = BatchNormalization(momentum=batch_norm_momentum,
-                                      epsilon=batch_norm_epsilon,
+        self.bn1 = BatchNormalization(momentum=self.batch_norm_momentum,
+                                      epsilon=self.batch_norm_epsilon,
                                       name='%s_bn1' % self.name)
         self.swish1 = Activation(tf.nn.swish, name='%s_swish1' % self.name)
 
         self.dwconv = DepthwiseConv2D(self.kernel_size, padding='same',
-                                      strides=dw_strides,
-                                      use_bias=False, name='%s_dwconv' % self.name)
-        self.bn2 = BatchNormalization(momentum=batch_norm_momentum,
-                                      epsilon=batch_norm_epsilon,
+                                      strides=self.dw_strides,
+                                      use_bias=False,
+                                      kernel_initializer=CONV_KERNEL_INITIALIZER,
+                                      name='%s_dwconv' % self.name)
+        self.bn2 = BatchNormalization(momentum=self.batch_norm_momentum,
+                                      epsilon=self.batch_norm_epsilon,
                                       name='%s_bn2' % self.name)
         self.swish2 = Activation(tf.nn.swish, name='%s_swish2' % self.name)
 
@@ -98,9 +131,10 @@ class MBConv(Layer):
                            strides=(1, 1),
                            padding='same',
                            use_bias=False,
+                           kernel_initializer=CONV_KERNEL_INITIALIZER,
                            name='%s_conv' % self.name)
-        self.bn3 = BatchNormalization(momentum=batch_norm_momentum,
-                                      epsilon=batch_norm_epsilon,
+        self.bn3 = BatchNormalization(momentum=self.batch_norm_momentum,
+                                      epsilon=self.batch_norm_epsilon,
                                       name='%s_bn3' % self.name)
 
     def call(self, inputs, training=None, mask=None):
@@ -138,6 +172,23 @@ class MBConv(Layer):
         output = tf.divide(inputs, keep_prob) * binary_tensor
         return output
 
+    def get_config(self):
+        config = super(MBConv, self).get_config()
+        config.update({
+            "dw_strides": self.dw_strides,
+            "identity_skip": self.identity_skip,
+            "batch_norm_momentum": self.batch_norm_momentum,
+            "batch_norm_epsilon": self.batch_norm_epsilon,
+            "kernel_size": self.kernel_size,
+            "filters": self.filters,
+            "se_ratio": self.se_ratio,
+            "expand_ratio": self.expand_ratio,
+            "expand_filters": self.expand_filters,
+            "squeezed_filters": self.squeezed_filters,
+            "dropout_rate": self.dropout_rate
+        })
+        return config
+
 
 class EfficientNet(Model, ABC):
     def __init__(self,
@@ -160,62 +211,114 @@ class EfficientNet(Model, ABC):
         self._dropout_rate = dropout_rate
         self._dropout_batch_rate = dropout_batch_rate
         self._image_resolution = image_resolution
+        self._batch_norm_momentum = batch_norm_momentum
+        self._batch_norm_epsilon = batch_norm_epsilon
 
-        self.list_channels = [32, 16, 24, 40, 80, 112, 192, 320, 1280]
-        self.list_num_repeats = [1, 2, 2, 3, 3, 4, 1]
-        self.expand_rates = [1, 6, 6, 6, 6, 6, 6]
-        self.strides = [1, 2, 2, 2, 1, 2, 1]
-        self.kernel_sizes = [3, 3, 5, 3, 5, 5, 3]
+        self._list_channels = [32, 16, 24, 40, 80, 112, 192, 320, 1280]
+        self._list_num_repeats = [1, 2, 2, 3, 3, 4, 1]
+        self._expand_rates = [1, 6, 6, 6, 6, 6, 6]
+        self._strides = [1, 2, 2, 2, 1, 2, 1]
+        self._kernel_sizes = [3, 3, 5, 3, 5, 5, 3]
 
-        self.list_channels = [EfficientNet.round_filters(
-            c, self.width_coefficient, self._divisor) for c in self.list_channels]
+        self._list_channels = [EfficientNet.round_filters(
+            c, self.width_coefficient, self._divisor) for c in self._list_channels]
 
-        self.list_num_repeats = [EfficientNet.round_repeats(
-            r, self.depth_coefficient) for r in self.list_num_repeats]
+        self._list_num_repeats = [EfficientNet.round_repeats(
+            r, self.depth_coefficient) for r in self._list_num_repeats]
 
         self.ll = [
-            Conv2D(self.list_channels[0], 2,
-                   strides=2,
-                   padding='same',
-                   use_bias=False,
-                   name='EffNet_conv1'),
-            BatchNormalization(momentum=batch_norm_momentum, epsilon=batch_norm_epsilon, name='EffNet_bn1'),
-            Activation(tf.nn.swish, name='EffNet_swish1')]
+            Conv2D(
+                self._list_channels[0], 3,
+                strides=2,
+                padding='valid',
+                use_bias=False,
+                kernel_initializer=CONV_KERNEL_INITIALIZER,
+                name='EffNet_conv1'),
+            BatchNormalization(
+                momentum=self.batch_norm_momentum,
+                epsilon=self.batch_norm_epsilon,
+                name='EffNet_bn1'),
+            Activation(
+                tf.nn.swish,
+                name='EffNet_swish1')]
 
         block_counter = 0
-        num_blocks = sum(self.list_num_repeats)
+        num_blocks = sum(self._list_num_repeats)
         for i in range(7):
-            ch = self.list_channels[i + 0]
-            ch_next = self.list_channels[i + 1]
+            ch = self._list_channels[i + 0]
+            ch_next = self._list_channels[i + 1]
 
-            for j in range(self.list_num_repeats[i]):
-                stride = self.strides[i] if j == 0 else 1
+            for j in range(self._list_num_repeats[i]):
+                stride = self._strides[i] if j == 0 else 1
                 chN = ch if j == 0 else ch_next
                 drop_rate = self.dropout_batch_rate * block_counter / num_blocks
                 self.ll.append(MBConv(
                     chN,
                     ch_next,
-                    self.expand_rates[i],
+                    self._expand_rates[i],
                     self.se_ratio,
                     stride,
-                    self.kernel_sizes[i],
+                    self._kernel_sizes[i],
                     drop_rate,
-                    batch_norm_momentum,
-                    batch_norm_epsilon,
-                    name='EffNet_MBConv%d_%d_%d' % (self.expand_rates[i], i, j)))
+                    self.batch_norm_momentum,
+                    self.batch_norm_epsilon,
+                    name='EffNet_MBConv%d_%d_%d' % (self._expand_rates[i], i, j)))
                 block_counter += 1
 
-        self.ll.append(Conv2D(self.list_channels[-1], 1, use_bias=False, name='EffNet_conv2'))
-        self.ll.append(BatchNormalization(momentum=batch_norm_momentum, epsilon=batch_norm_epsilon, name='EffNet_bn2'))
-        self.ll.append(Activation(tf.nn.swish, name='EffNet_swish2'))
-        self.ll.append(GlobalAvgPool2D(name='EffNet_gloavg'))
-        self.ll.append(Dropout(self.dropout_rate, name='EffNet_drop'))
-        self.ll.append(Dense(num_classes, activation=tf.keras.activations.softmax, name='EffNet_fc'))
+        self.ll.append(Conv2D(
+            self._list_channels[-1],
+            1,
+            use_bias=False,
+            kernel_initializer=CONV_KERNEL_INITIALIZER,
+            name='EffNet_conv2'))
+        self.ll.append(BatchNormalization(
+            momentum=self.batch_norm_momentum,
+            epsilon=self.batch_norm_epsilon,
+            name='EffNet_bn2'))
+        self.ll.append(Activation(
+            tf.nn.swish,
+            name='EffNet_swish2'))
+        self.ll.append(GlobalAvgPool2D(
+            name='EffNet_gloavg'))
+        self.ll.append(Dropout(
+            self.dropout_rate,
+            name='EffNet_drop'))
+        self.ll.append(Dense(
+            num_classes,
+            kernel_initializer=DENSE_KERNEL_INITIALIZER,
+            activation=tf.keras.activations.softmax,
+            name='EffNet_fc'))
 
         self.nn = Sequential(self.ll)
 
     def call(self, inputs, training=None, mask=None):
         return self.nn(inputs)
+
+    def get_config(self):
+        return {
+            "_divisor": self._divisor,
+            "_width_coefficient": self._width_coefficient,
+            "_depth_coefficient": self._depth_coefficient,
+            "_se_ratio": self._se_ratio,
+            "_dropout_rate": self._dropout_rate,
+            "_dropout_batch_rate": self._dropout_batch_rate,
+            "_image_resolution": self._image_resolution,
+            "_batch_norm_momentum": self._batch_norm_momentum,
+            "_batch_norm_epsilon": self._batch_norm_epsilon,
+            "_list_channels": self._list_channels,
+            "_list_num_repeats": self._list_num_repeats,
+            "_expand_rates": self._expand_rates,
+            "_strides": self._strides,
+            "_kernel_sizes": self._kernel_sizes
+        }
+
+    @property
+    def batch_norm_momentum(self):
+        return self._batch_norm_momentum
+
+    @property
+    def batch_norm_epsilon(self):
+        return self._batch_norm_epsilon
 
     @property
     def width_coefficient(self):
@@ -371,7 +474,7 @@ class DatasetPreprocessor:
         return ds.map(
             lambda x, y: (DatasetPreprocessor.normalize_features(
                 tf.image.resize(x, [self.target_height, self.target_width], method=self.resize_method)),
-                tf.one_hot(y, self.classes_number, dtype=tf.uint32)))
+                          tf.one_hot(y, self.classes_number, dtype=tf.uint32)))
 
     def normalize_features(features,
                            mean_rgb=[0.485 * 255, 0.456 * 255, 0.406 * 255],
@@ -395,33 +498,33 @@ if __name__ == '__main__':
     CLASSES_NUMBER = 10
     AUTOTUNE = tf.data.AUTOTUNE
 
-    decay = 0.9
-    epsilon = 0.001
-    momentum = 0.9
-    initial_learning_rate = 0.016
-    steps_per_epoch = 50000 / BATCH_SIZE
-    decay_factor = 0.97
-    decay_epochs = 2.4
-    batch_norm_momentum = 0.99
-    batch_norm_epsilon = 1e-3
-    se_ratio = 0.25
-    epochs = 10
+    DECAY = 0.9
+    EPSILON = 0.001
+    MOMENTUM = 0.9
+    INITIAL_LEARNING_RATE = 0.016
+    STEPS_PER_EPOCH = 50000 / BATCH_SIZE
+    DECAY_FACTOR = 0.97
+    DECAY_EPOCHS = 2.4
+    BATCH_NORM_MOMENTUM = 0.99
+    BATCH_NORM_EPSILON = 1e-3
+    SE_RATIO = 0.25
+    EPOCHS = 10
 
-    scaled_lr = initial_learning_rate * (BATCH_SIZE / 256.0)
+    scaled_lr = INITIAL_LEARNING_RATE * (BATCH_SIZE / 256.0)
 
-    decay_steps = steps_per_epoch * decay_epochs
+    decay_steps = STEPS_PER_EPOCH * DECAY_EPOCHS
 
     lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
         scaled_lr,
         decay_steps=decay_steps,
-        decay_rate=decay_factor,
+        decay_rate=DECAY_FACTOR,
         staircase=True)
 
     with tf.device('/device:GPU:0'):
-        en = EfficientNetB0(CLASSES_NUMBER, se_ratio, batch_norm_momentum, batch_norm_epsilon)
-        en.compile(optimizer=tf.keras.optimizers.RMSprop(lr_schedule, decay, momentum, epsilon),
+        en = EfficientNetB0(CLASSES_NUMBER, SE_RATIO, BATCH_NORM_MOMENTUM, BATCH_NORM_EPSILON)
+        en.compile(optimizer=tf.keras.optimizers.RMSprop(lr_schedule, DECAY, MOMENTUM, EPSILON),
                    loss=tf.keras.losses.CategoricalCrossentropy(),
-                   metrics=[tf.keras.metrics.Accuracy(), tf.keras.metrics.TopKCategoricalAccuracy()])
+                   metrics=['accuracy', tf.keras.metrics.TopKCategoricalAccuracy()])
         en.build((BATCH_SIZE, en.image_resolution, en.image_resolution, CHANNEL_COUNT))
         print(en.summary())
 
@@ -431,24 +534,31 @@ if __name__ == '__main__':
 
         dspr = DatasetPreprocessor(CLASSES_NUMBER, en.image_resolution, en.image_resolution)
         ds_train_gpu = dspr.process_as_dataset(ds_train)
-        ds_train_gpu = ds_train_gpu.cache().shuffle(1000).batch(BATCH_SIZE).prefetch(buffer_size=AUTOTUNE)
+        ds_train_gpu = ds_train_gpu.cache().take(8).batch(BATCH_SIZE).prefetch(buffer_size=AUTOTUNE)
         print(ds_train_gpu)
 
         ds_test_gpu = dspr.process_as_dataset(ds_test)
-        ds_test_gpu = ds_test_gpu.cache().shuffle(1000).batch(BATCH_SIZE).prefetch(buffer_size=AUTOTUNE)
+        ds_test_gpu = ds_test_gpu.cache().take(8).batch(BATCH_SIZE).prefetch(buffer_size=AUTOTUNE)
         print(ds_test_gpu)
 
-        history = en.fit(ds_train_gpu, epochs=epochs)
+        history = en.fit(ds_train_gpu, epochs=EPOCHS)
         results = en.evaluate(ds_test_gpu)
         print(results)
 
-        en.save('EfficientNetB0.h5')
+        print(en.get_config())
+        en.save('EfficientNetB0')
+        del en
+
+        en = tf.keras.models.load_model('EfficientNetB0')
+        history = en.fit(ds_train_gpu, epochs=EPOCHS)
+        results = en.evaluate(ds_test_gpu)
+        print(results)
 
         acc = history.history['accuracy']
         top5_acc = history.history['top_k_categorical_accuracy']
         loss = history.history['loss']
 
-        epochs_range = range(epochs)
+        epochs_range = range(EPOCHS)
 
         plt.figure(figsize=(8, 8))
         plt.subplot(1, 2, 1)
