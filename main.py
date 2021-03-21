@@ -484,6 +484,27 @@ class DatasetPreprocessor:
         return features
 
 
+def plot_history(history, epochs):
+    acc = history.history['accuracy']
+    top5_acc = history.history['top_k_categorical_accuracy']
+    loss = history.history['loss']
+
+    epochs_range = range(epochs)
+
+    plt.figure(figsize=(8, 8))
+    plt.subplot(1, 2, 1)
+    plt.plot(epochs_range, acc, label='Training Accuracy')
+    plt.plot(epochs_range, top5_acc, label='Top5 Training Accuracy')
+    plt.legend(loc='lower right')
+    plt.title('Training Accuracy')
+
+    plt.subplot(1, 2, 2)
+    plt.plot(epochs_range, loss, label='Training Loss')
+    plt.legend(loc='upper right')
+    plt.title('Training Loss')
+    plt.show()
+
+
 if __name__ == '__main__':
     print(tf.__version__)
     print("Num GPUs Available: ", tf.config.list_physical_devices('GPU'))
@@ -509,6 +530,7 @@ if __name__ == '__main__':
     BATCH_NORM_EPSILON = 1e-3
     SE_RATIO = 0.25
     EPOCHS = 10
+    WEIGHTS_PATH = './app/EfficientNetB0/weights'
 
     scaled_lr = INITIAL_LEARNING_RATE * (BATCH_SIZE / 256.0)
 
@@ -534,43 +556,32 @@ if __name__ == '__main__':
 
         dspr = DatasetPreprocessor(CLASSES_NUMBER, en.image_resolution, en.image_resolution)
         ds_train_gpu = dspr.process_as_dataset(ds_train)
-        ds_train_gpu = ds_train_gpu.cache().take(8).batch(BATCH_SIZE).prefetch(buffer_size=AUTOTUNE)
+        ds_train_gpu = ds_train_gpu.cache().shuffle(1000).batch(BATCH_SIZE).prefetch(buffer_size=AUTOTUNE)
         print(ds_train_gpu)
 
         ds_test_gpu = dspr.process_as_dataset(ds_test)
-        ds_test_gpu = ds_test_gpu.cache().take(8).batch(BATCH_SIZE).prefetch(buffer_size=AUTOTUNE)
+        ds_test_gpu = ds_test_gpu.cache().shuffle(1000).batch(BATCH_SIZE).prefetch(buffer_size=AUTOTUNE)
         print(ds_test_gpu)
 
-        history = en.fit(ds_train_gpu, epochs=EPOCHS)
+        history = en.fit(ds_train_gpu, epochs=EPOCHS, shuffle=True)
         results = en.evaluate(ds_test_gpu)
         print(results)
-
         print(en.get_config())
-        en.save('EfficientNetB0')
+        plot_history(history, EPOCHS)
+
+        en.save_weights(WEIGHTS_PATH)
         del en
 
-        en = tf.keras.models.load_model('EfficientNetB0')
-        history = en.fit(ds_train_gpu, epochs=EPOCHS)
-        results = en.evaluate(ds_test_gpu)
-        print(results)
-
-        acc = history.history['accuracy']
-        top5_acc = history.history['top_k_categorical_accuracy']
-        loss = history.history['loss']
-
-        epochs_range = range(EPOCHS)
-
-        plt.figure(figsize=(8, 8))
-        plt.subplot(1, 2, 1)
-        plt.plot(epochs_range, acc, label='Training Accuracy')
-        plt.plot(epochs_range, top5_acc, label='Top5 Training Accuracy')
-        plt.legend(loc='lower right')
-        plt.title('Training Accuracy')
-
-        plt.subplot(1, 2, 2)
-        plt.plot(epochs_range, loss, label='Training Loss')
-        plt.legend(loc='upper right')
-        plt.title('Training Loss')
-        plt.show()
+        # Load weights. Don't use save/load_model - can't train model after loading
+        # en = EfficientNetB0(CLASSES_NUMBER, SE_RATIO, BATCH_NORM_MOMENTUM, BATCH_NORM_EPSILON)
+        # en.load_weights(WEIGHTS_PATH)
+        # en.compile(optimizer=tf.keras.optimizers.RMSprop(lr_schedule, DECAY, MOMENTUM, EPSILON),
+        #            loss=tf.keras.losses.CategoricalCrossentropy(),
+        #            metrics=['accuracy', tf.keras.metrics.TopKCategoricalAccuracy()])
+        # en.build((BATCH_SIZE, en.image_resolution, en.image_resolution, CHANNEL_COUNT))
+        # history = en.fit(ds_train_gpu, epochs=EPOCHS)
+        # results = en.evaluate(ds_test_gpu)
+        # print(results)
+        # plot_history(history, EPOCHS)
 
     exit(0)

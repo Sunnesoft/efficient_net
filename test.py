@@ -11,3 +11,4 @@ with tf.device('/device:CPU:0'):
                metrics=['accuracy', tf.keras.metrics.TopKCategoricalAccuracy()])
     en.build((BATCH_SIZE, 224, 224, CHANNEL_COUNT))
     print(en.summary())
+    print(en.get_config())
